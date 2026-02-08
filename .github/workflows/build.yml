@@ -1,0 +1,153 @@
+name: Build libcronet
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  # ── Linux builds (Docker) ──────────────────────────────────────────────────
+  build-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cpu: [x64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build libcronet.so (linux-${{ matrix.cpu }})
+        run: |
+          docker build \
+            --build-arg TARGET_OS=linux \
+            --build-arg TARGET_CPU=${{ matrix.cpu }} \
+            -t cronet-linux-${{ matrix.cpu }} .
+
+      - name: Extract artifacts
+        run: |
+          container_id=$(docker create cronet-linux-${{ matrix.cpu }})
+          docker cp "$container_id:/artifacts" ./artifacts-linux-${{ matrix.cpu }}
+          docker rm "$container_id"
+          ls -lh ./artifacts-linux-${{ matrix.cpu }}/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cronet-linux-${{ matrix.cpu }}
+          path: artifacts-linux-${{ matrix.cpu }}/
+
+  # ── Windows cross-compile (Docker, via xwin) ───────────────────────────────
+  build-windows:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cpu: [x64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build cronet.dll (win-${{ matrix.cpu }})
+        run: |
+          docker build \
+            --build-arg TARGET_OS=win \
+            --build-arg TARGET_CPU=${{ matrix.cpu }} \
+            -t cronet-win-${{ matrix.cpu }} .
+
+      - name: Extract artifacts
+        run: |
+          container_id=$(docker create cronet-win-${{ matrix.cpu }})
+          docker cp "$container_id:/artifacts" ./artifacts-win-${{ matrix.cpu }}
+          docker rm "$container_id"
+          ls -lh ./artifacts-win-${{ matrix.cpu }}/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cronet-win-${{ matrix.cpu }}
+          path: artifacts-win-${{ matrix.cpu }}/
+
+  # ── Android builds (Docker) ────────────────────────────────────────────────
+  build-android:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cpu: [arm64, arm]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build libcronet.so (android-${{ matrix.cpu }})
+        run: |
+          docker build \
+            --build-arg TARGET_OS=android \
+            --build-arg TARGET_CPU=${{ matrix.cpu }} \
+            -t cronet-android-${{ matrix.cpu }} .
+
+      - name: Extract artifacts
+        run: |
+          container_id=$(docker create cronet-android-${{ matrix.cpu }})
+          docker cp "$container_id:/artifacts" ./artifacts-android-${{ matrix.cpu }}
+          docker rm "$container_id"
+          ls -lh ./artifacts-android-${{ matrix.cpu }}/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cronet-android-${{ matrix.cpu }}
+          path: artifacts-android-${{ matrix.cpu }}/
+
+  # ── Release ────────────────────────────────────────────────────────────────
+  release:
+    needs: [build-linux, build-windows, build-android]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts
+
+      - name: Get version
+        id: version
+        run: echo "version=$(date +%Y.%m.%d)-$(echo $GITHUB_SHA | head -c7)" >> "$GITHUB_OUTPUT"
+
+      - name: Package artifacts
+        run: |
+          cd all-artifacts
+          for dir in */; do
+            name="${dir%/}"
+            tar czf "../${name}.tar.gz" -C "$dir" .
+          done
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: Cronet ${{ steps.version.outputs.version }}
+          files: "*.tar.gz"
+          body: |
+            Automated build from NaiveProxy/Chromium net stack.
+
+            **Linux:**
+            - `cronet-linux-x64.tar.gz` -- `libcronet.so` + `cronet_api.h`
+            - `cronet-linux-arm64.tar.gz` -- `libcronet.so` + `cronet_api.h`
+
+            **Windows (cross-compiled via xwin):**
+            - `cronet-win-x64.tar.gz` -- `cronet.dll` + `cronet_api.h`
+            - `cronet-win-arm64.tar.gz` -- `cronet.dll` + `cronet_api.h`
+
+            **Android:**
+            - `cronet-android-arm64.tar.gz` -- `libcronet.so` + `cronet_api.h`
+            - `cronet-android-arm.tar.gz` -- `libcronet.so` + `cronet_api.h`

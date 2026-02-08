@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+.claude/
+out/
+*.so
+*.dll
+*.dylib
+*.o
+*.a
