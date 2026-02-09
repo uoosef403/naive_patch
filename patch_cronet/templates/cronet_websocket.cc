@@ -1,7 +1,9 @@
 /*
  * cronet_websocket.cc -- WebSocket: WebSocketEventInterface implementation.
  */
-#include "tools/cronet/cronet_websocket.h"
+#include "net/tools/cronet/cronet_websocket.h"
+
+#include <tuple>
 
 #include "base/functional/bind.h"
 #include "base/task/single_thread_task_runner.h"
@@ -13,7 +15,7 @@
 #include "net/websockets/websocket_channel.h"
 #include "url/gurl.h"
 #include "url/origin.h"
-#include "tools/cronet/cronet_engine.h"
+#include "net/tools/cronet/cronet_engine.h"
 
 namespace {
 constexpr net::NetworkTrafficAnnotationTag kTrafficAnnotation =
@@ -97,7 +99,8 @@ void CronetWebSocket::ConnectOnIOThread(
   url::Origin origin = url::Origin::Create(gurl);
   net::SiteForCookies site_for_cookies =
       net::SiteForCookies::FromOrigin(origin);
-  net::IsolationInfo isolation_info = net::IsolationInfo::CreateTransient();
+  net::IsolationInfo isolation_info =
+      net::IsolationInfo::CreateTransient(std::nullopt);
 
   channel_->SendAddChannelRequest(
       gurl, subprotocols, origin, site_for_cookies,
@@ -117,13 +120,14 @@ void CronetWebSocket::SendOnIOThread(std::string data, int is_binary) {
       is_binary ? net::WebSocketEventInterface::WebSocketMessageType(2)
                 : net::WebSocketEventInterface::WebSocketMessageType(1);
 
-  channel_->SendFrame(true, opcode, std::move(buffer), data.size());
+  std::ignore = channel_->SendFrame(true, opcode, std::move(buffer),
+                                    data.size());
 }
 
 void CronetWebSocket::CloseOnIOThread(uint16_t code,
                                        const std::string& reason) {
   if (channel_) {
-    channel_->StartClosingHandshake(code, reason);
+    std::ignore = channel_->StartClosingHandshake(code, reason);
   }
 }
 
@@ -213,11 +217,14 @@ void CronetWebSocket::OnStartOpeningHandshake(
 }
 
 void CronetWebSocket::OnSSLCertificateError(
-    std::unique_ptr<net::WebSocketEventInterface::SSLErrorCallbacks> callbacks,
+    std::unique_ptr<net::WebSocketEventInterface::SSLErrorCallbacks>
+        ssl_error_callbacks,
+    const GURL& url,
+    int net_error,
     const net::SSLInfo& ssl_info,
     bool fatal) {
   // Reject invalid certificates by default.
-  callbacks->CancelSSLRequest(net::ERR_CERT_AUTHORITY_INVALID, &ssl_info);
+  ssl_error_callbacks->CancelSSLRequest(net_error, &ssl_info);
 }
 
 int CronetWebSocket::OnAuthRequired(

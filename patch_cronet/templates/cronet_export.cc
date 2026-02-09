@@ -3,13 +3,12 @@
  *
  * All CRONET_EXPORT functions delegate to internal C++ structs.
  */
-#include "tools/cronet/cronet_api.h"
-#include "tools/cronet/cronet_engine.h"
-#include "tools/cronet/cronet_request.h"
-#include "tools/cronet/cronet_websocket.h"
+#include "net/tools/cronet/cronet_api.h"
+#include "net/tools/cronet/cronet_engine.h"
+#include "net/tools/cronet/cronet_request.h"
+#include "net/tools/cronet/cronet_websocket.h"
 
 #include "base/version_info/version_info.h"
-#include "components/version_info/version_info_with_user_agent.h"
 
 /* -------------------------------------------------------------------------- */
 /*  Version                                                                   */
@@ -23,7 +22,7 @@ extern "C" CRONET_EXPORT const char* cronet_version(void) {
 
 extern "C" CRONET_EXPORT const char* cronet_user_agent_string(void) {
   static std::string ua =
-      std::string(version_info::GetUserAgent());
+      "Cronet/" + std::string(version_info::GetVersionNumber());
   return ua.c_str();
 }
 

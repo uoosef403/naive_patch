@@ -9,9 +9,10 @@
 #include <vector>
 
 #include "net/http/http_request_headers.h"
+#include "url/gurl.h"
 #include "net/websockets/websocket_channel.h"
 #include "net/websockets/websocket_event_interface.h"
-#include "tools/cronet/cronet_api.h"
+#include "net/tools/cronet/cronet_api.h"
 
 struct CronetEngine;
 
@@ -57,7 +58,9 @@ struct CronetWebSocket : public net::WebSocketEventInterface {
       std::unique_ptr<net::WebSocketHandshakeRequestInfo> request) override;
   void OnSSLCertificateError(
       std::unique_ptr<net::WebSocketEventInterface::SSLErrorCallbacks>
-          callbacks,
+          ssl_error_callbacks,
+      const GURL& url,
+      int net_error,
       const net::SSLInfo& ssl_info,
       bool fatal) override;
   int OnAuthRequired(

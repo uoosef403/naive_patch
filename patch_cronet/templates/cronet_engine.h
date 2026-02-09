@@ -5,6 +5,7 @@
 #define NET_TOOLS_CRONET_CRONET_ENGINE_H_
 
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include "base/at_exit.h"
@@ -12,7 +13,7 @@
 #include "base/synchronization/waitable_event.h"
 #include "base/threading/thread.h"
 #include "net/url_request/url_request_context.h"
-#include "tools/cronet/cronet_api.h"
+#include "net/tools/cronet/cronet_api.h"
 
 struct CronetEngine {
   CronetEngine();

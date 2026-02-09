@@ -16,10 +16,6 @@ RUN apt-get update && apt-get install -y \
     libnss3-dev \
     build-essential \
     python-is-python3 \
-    && rm -rf /var/lib/apt/lists/*
-
-# For Android builds: mount system images
-RUN apt-get update && apt-get install -y \
     sudo \
     && rm -rf /var/lib/apt/lists/*
 
@@ -42,18 +38,42 @@ RUN git clone https://gn.googlesource.com/gn tmp/gn && \
 # Download the Clang toolchain
 RUN ./get-clang.sh
 
-# Copy and apply the cronet patches
-COPY patch_cronet/ /opt/patch_cronet/
-ENV PYTHONPATH=/opt
-RUN python3 -m patch_cronet /workspace/src
-
-# ── Build target ─────────────────────────────────────────────────────────────
-# Override with --build-arg:
-#   docker build --build-arg TARGET_OS=win --build-arg TARGET_CPU=x64 .
-#   docker build --build-arg TARGET_OS=android --build-arg TARGET_CPU=arm64 .
-#   docker build --build-arg TARGET_OS=linux --build-arg TARGET_CPU=arm64 .
+# ── Pre-download Windows SDK + PGO (cached before patches) ─────────────────
+# These downloads are ~1.4 GB combined and rarely change; caching them avoids
+# re-downloading on every patch_cronet/ edit.
 ARG TARGET_OS=linux
 ARG TARGET_CPU=x64
+
+# xwin: Windows SDK + CRT (only for win targets)
+RUN if [ "$TARGET_OS" = "win" ]; then \
+        XWIN_DIR="third_party/xwin" && \
+        XWIN_SDK="$XWIN_DIR/sdk" && \
+        mkdir -p "$XWIN_DIR" && \
+        XWIN_VERSION="0.6.5" && \
+        curl -L "https://github.com/Jake-Shadle/xwin/releases/download/${XWIN_VERSION}/xwin-${XWIN_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+            | tar xzf - --strip-components=1 -C "$XWIN_DIR" && \
+        "$XWIN_DIR/xwin" --accept-license splat --output "$XWIN_SDK"; \
+    fi
+
+# PGO profile (fetched for all platforms)
+RUN if grep -q 'chrome_pgo_phase' build/config/compiler/pgo/pgo.gni 2>/dev/null; then \
+        case "$TARGET_OS" in \
+            win) case "$TARGET_CPU" in \
+                    arm64) _PGO=win-arm64;; x64) _PGO=win64;; *) _PGO=win32;; \
+                 esac;; \
+            linux) _PGO=linux;; \
+            android) case "$TARGET_CPU" in \
+                        arm64) _PGO=android-arm64;; *) _PGO=android-arm32;; \
+                     esac;; \
+            *) _PGO="";; \
+        esac && \
+        if [ "$_PGO" ] && [ -f "chrome/build/${_PGO}.pgo.txt" ]; then \
+            PGO_PATH=$(cat "chrome/build/${_PGO}.pgo.txt") && \
+            mkdir -p chrome/build/pgo_profiles && \
+            curl --limit-rate 10M -Lo "chrome/build/pgo_profiles/$PGO_PATH" \
+                "https://storage.googleapis.com/chromium-optimization-profiles/pgo_profiles/$PGO_PATH"; \
+        fi; \
+    fi
 
 # For Android: fetch NDK + system image before building
 RUN if [ "$TARGET_OS" = "android" ]; then \
@@ -61,6 +81,12 @@ RUN if [ "$TARGET_OS" = "android" ]; then \
         EXTRA_FLAGS="target_os=\"android\" target_cpu=\"${TARGET_CPU}\"" ./get-android-sys.sh || true; \
     fi
 
+# ── Apply patches (changes here only rebuild from this point) ──────────────
+COPY patch_cronet/ /opt/patch_cronet/
+ENV PYTHONPATH=/opt
+RUN python3 -m patch_cronet /workspace/src
+
+# ── Build ──────────────────────────────────────────────────────────────────
 RUN ./build_cronet.sh ${TARGET_OS} ${TARGET_CPU}
 
 # ── Collect artifacts ────────────────────────────────────────────────────────

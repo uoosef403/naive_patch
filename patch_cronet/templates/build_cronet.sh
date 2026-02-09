@@ -49,6 +49,7 @@ enable_mdns=false
 enable_reporting=false
 include_transport_security_state_preload_list=false
 enable_device_bound_sessions=false
+enable_disk_cache_sql_backend=false
 
 # Match NaiveProxy's stripped-down build
 use_udev=false
@@ -93,53 +94,201 @@ target_sysroot=\"//$WITH_SYSROOT\""
 
     win)
         # ── Windows cross-compilation from Linux ──
-        # Downloads Windows SDK + MSVC CRT via xwin, then passes explicit
-        # paths to GN so vs_toolchain.py auto-detection is bypassed.
+        # Downloads Windows SDK + MSVC CRT via xwin, then remaps the flat
+        # output into the versioned layout that Chromium's GN expects.
         XWIN_DIR="$SCRIPT_DIR/third_party/xwin"
         XWIN_SDK="$XWIN_DIR/sdk"
+        XWIN_BIN="$XWIN_DIR/xwin"
 
-        if [ ! -d "$XWIN_SDK/Include" ]; then
+        # Download xwin binary if needed
+        if [ ! -f "$XWIN_BIN" ]; then
+            echo "=== Downloading xwin ==="
+            mkdir -p "$XWIN_DIR"
+            XWIN_VERSION="0.6.5"
+            curl -L "https://github.com/Jake-Shadle/xwin/releases/download/${XWIN_VERSION}/xwin-${XWIN_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+                | tar xzf - --strip-components=1 -C "$XWIN_DIR"
+        fi
+
+        # Download Windows SDK + CRT if needed
+        if [ ! -d "$XWIN_SDK/crt" ]; then
             echo "=== Downloading Windows SDK + CRT via xwin ==="
-            XWIN_BIN="$XWIN_DIR/xwin"
-            if [ ! -f "$XWIN_BIN" ]; then
-                mkdir -p "$XWIN_DIR"
-                XWIN_VERSION="0.6.5"
-                curl -L "https://github.com/Jake-Shadle/xwin/releases/download/${XWIN_VERSION}/xwin-${XWIN_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
-                    | tar xzf - --strip-components=1 -C "$XWIN_DIR"
-            fi
             "$XWIN_BIN" --accept-license splat --output "$XWIN_SDK"
             echo "=== Windows SDK downloaded to $XWIN_SDK ==="
         fi
 
-        # Map xwin's layout to what Chromium expects:
-        #   xwin splats to: sdk/Include/, sdk/Lib/, sdk/crt/include/, sdk/crt/lib/
-        # Chromium GN needs:
-        #   visual_studio_path  -> contains VC/Tools/MSVC/<ver>/
-        #   windows_sdk_path    -> contains Include/<sdk_ver>/ and Lib/<sdk_ver>/
+        # xwin 0.6.x outputs a flat layout:
+        #   $XWIN_SDK/crt/{include, lib/{x86_64,aarch64,...}}
+        #   $XWIN_SDK/sdk/include/{ucrt,um,shared,winrt,cppwinrt}
+        #   $XWIN_SDK/sdk/lib/{ucrt,um}/{x86_64,aarch64,...}
+        #
+        # Chromium's GN expects a Visual Studio-style versioned layout:
+        #   windows_sdk_path/Include/<version>/{ucrt,um,shared,...}
+        #   windows_sdk_path/Lib/<version>/{ucrt,um}/{x64,arm64,...}
+        #   visual_studio_path/VC/Tools/MSVC/<ver>/include
+        #   visual_studio_path/VC/Tools/MSVC/<ver>/lib/{x64,arm64,...}
+
+        WIN_SDK_VER="10.0.26100.0"
+        MSVC_VER="14.40.0"
+
+        # Helper: map xwin arch names to MSVC arch names
+        _msvc_arch() {
+            case "$1" in
+                x86_64)  echo "x64" ;;
+                aarch64) echo "arm64" ;;
+                *)       echo "$1" ;;
+            esac
+        }
+
+        # Remap SDK headers into versioned Include/ layout
+        if [ -d "$XWIN_SDK/sdk/include" ] && [ ! -d "$XWIN_SDK/Include/$WIN_SDK_VER" ]; then
+            echo "=== Remapping SDK include layout for Chromium ==="
+            mkdir -p "$XWIN_SDK/Include/$WIN_SDK_VER"
+            for d in "$XWIN_SDK/sdk/include/"*; do
+                [ -d "$d" ] && ln -sfn "$d" "$XWIN_SDK/Include/$WIN_SDK_VER/$(basename "$d")"
+            done
+        fi
+
+        # Remap SDK libs into versioned Lib/ layout with MSVC arch names
+        if [ -d "$XWIN_SDK/sdk/lib" ] && [ ! -d "$XWIN_SDK/Lib/$WIN_SDK_VER" ]; then
+            echo "=== Remapping SDK lib layout for Chromium ==="
+            mkdir -p "$XWIN_SDK/Lib/$WIN_SDK_VER"
+            for d in "$XWIN_SDK/sdk/lib/"*; do
+                if [ -d "$d" ]; then
+                    cat_name=$(basename "$d")  # e.g. "ucrt", "um"
+                    mkdir -p "$XWIN_SDK/Lib/$WIN_SDK_VER/$cat_name"
+                    for arch_d in "$d/"*; do
+                        if [ -d "$arch_d" ]; then
+                            ln -sfn "$arch_d" "$XWIN_SDK/Lib/$WIN_SDK_VER/$cat_name/$(_msvc_arch "$(basename "$arch_d")")"
+                        fi
+                    done
+                fi
+            done
+        fi
+
+        # Set up VS layout for CRT
         XWIN_VS="$XWIN_SDK/vs"
-        if [ ! -d "$XWIN_VS/VC/Tools/MSVC" ]; then
-            echo "=== Arranging SDK layout for Chromium ==="
-            mkdir -p "$XWIN_VS/VC/Tools/MSVC/14.40.0"
-            # CRT headers + libs
+        if [ ! -d "$XWIN_VS/VC/Tools/MSVC/$MSVC_VER" ]; then
+            echo "=== Arranging CRT layout for Chromium ==="
+            mkdir -p "$XWIN_VS/VC/Tools/MSVC/$MSVC_VER"
             if [ -d "$XWIN_SDK/crt/include" ]; then
-                ln -sfn "$XWIN_SDK/crt/include" "$XWIN_VS/VC/Tools/MSVC/14.40.0/include"
-                mkdir -p "$XWIN_VS/VC/Tools/MSVC/14.40.0/lib"
+                ln -sfn "$XWIN_SDK/crt/include" "$XWIN_VS/VC/Tools/MSVC/$MSVC_VER/include"
+                mkdir -p "$XWIN_VS/VC/Tools/MSVC/$MSVC_VER/lib"
                 for arch_dir in "$XWIN_SDK/crt/lib/"*; do
                     if [ -d "$arch_dir" ]; then
-                        ln -sfn "$arch_dir" "$XWIN_VS/VC/Tools/MSVC/14.40.0/lib/$(basename "$arch_dir")"
+                        ln -sfn "$arch_dir" "$XWIN_VS/VC/Tools/MSVC/$MSVC_VER/lib/$(_msvc_arch "$(basename "$arch_dir")")"
                     fi
                 done
             fi
         fi
 
-        # Read the SDK version from directory listing
-        WIN_SDK_VER=""
-        if [ -d "$XWIN_SDK/Include" ]; then
-            WIN_SDK_VER=$(ls "$XWIN_SDK/Include/" | grep '^10\.' | head -1)
-        fi
-        if [ -z "$WIN_SDK_VER" ]; then
-            WIN_SDK_VER="10.0.26100.0"
-        fi
+        # ── Case-sensitivity fix ──
+        # xwin on Linux may store headers in lowercase (e.g. winsock2.h) but
+        # Chromium includes use original Windows case (e.g. Winsock2.h).
+        # Linux filesystems are case-sensitive, so we need to create symlinks
+        # for the original-case names.  We use xwin's --include-debug-libs
+        # is not needed, but we DO need symlinks.
+        #
+        # Check if headers are lowercase and create case-correcting symlinks.
+        _fix_sdk_case() {
+            local sdk_inc="$1"
+            if [ ! -d "$sdk_inc" ]; then return; fi
+
+            echo "=== Fixing SDK header case for case-sensitive filesystem ==="
+
+            # Common Windows SDK headers that Chromium includes with specific case
+            # Map: lowercase_name -> OriginalCase
+            declare -A CASE_MAP=(
+                # um/ headers
+                ["winsock2.h"]="Winsock2.h"
+                ["mswsock.h"]="Mswsock.h"
+                ["ws2tcpip.h"]="Ws2tcpip.h"
+                ["windows.h"]="Windows.h"
+                ["wincrypt.h"]="WinCrypt.h"
+                ["iphlpapi.h"]="Iphlpapi.h"
+                ["nb30.h"]="Nb30.h"
+                ["ncrypt.h"]="NCrypt.h"
+                ["ntsecapi.h"]="NtSecAPI.h"
+                ["rpc.h"]="Rpc.h"
+                ["winspool.h"]="WinSpool.h"
+                ["dbghelp.h"]="DbgHelp.h"
+                ["shlobj.h"]="ShlObj.h"
+                ["winhttp.h"]="WinHttp.h"
+                ["wininet.h"]="WinInet.h"
+                ["setupapi.h"]="SetupAPI.h"
+                ["shellapi.h"]="ShellApi.h"
+                ["shlwapi.h"]="Shlwapi.h"
+                ["winscard.h"]="WinSCard.h"
+                ["mmsystem.h"]="MMSystem.h"
+                ["powrprof.h"]="PowrProf.h"
+                ["psapi.h"]="Psapi.h"
+                ["lmcons.h"]="LMCons.h"
+                ["wtsapi32.h"]="WtsApi32.h"
+                ["pdh.h"]="Pdh.h"
+                ["mstcpip.h"]="MSTcpIP.h"
+                ["msxml6.h"]="MsXml6.h"
+                ["accctrl.h"]="AccCtrl.h"
+                ["aclapi.h"]="AclAPI.h"
+                ["commdlg.h"]="CommDlg.h"
+                ["commoncontrols.h"]="CommonControls.h"
+                ["dbt.h"]="Dbt.h"
+                ["dwmapi.h"]="DwmApi.h"
+                ["ipexport.h"]="IPExport.h"
+                ["icmpapi.h"]="IcmpAPI.h"
+                ["lm.h"]="Lm.h"
+                ["softpub.h"]="SoftPub.h"
+                ["mscat.h"]="MsCat.h"
+                ["iprtrmib.h"]="IpRtrMib.h"
+                ["iptypes.h"]="IPTypes.h"
+                ["tcpmib.h"]="TcpMib.h"
+                ["udpmib.h"]="UdpMib.h"
+                ["ifmib.h"]="IfMib.h"
+                ["ipmib.h"]="IpMib.h"
+                ["netioapi.h"]="NetioApi.h"
+                ["mprapi.h"]="MprApi.h"
+                ["wlanapi.h"]="WlanAPI.h"
+                # shared/ headers
+                ["guiddef.h"]="GuidDef.h"
+                ["wmistr.h"]="WmiStr.h"
+                ["evntrace.h"]="EvnTrace.h"
+                ["stralign.h"]="StrAlign.h"
+                ["inaddr.h"]="InAddr.h"
+                ["in6addr.h"]="In6Addr.h"
+                ["devpropdef.h"]="DevPropDef.h"
+                ["tcpestats.h"]="TcpEStats.h"
+            )
+
+            # For each include subdirectory (um, shared, ucrt, etc.)
+            for inc_sub in "$sdk_inc"/*/; do
+                [ -d "$inc_sub" ] || continue
+                for lower_name in "${!CASE_MAP[@]}"; do
+                    orig_case="${CASE_MAP[$lower_name]}"
+                    lower_file="$inc_sub/$lower_name"
+                    orig_file="$inc_sub/$orig_case"
+                    # If lowercase exists but original case does not, create symlink
+                    if [ -f "$lower_file" ] && [ ! -e "$orig_file" ]; then
+                        ln -s "$lower_name" "$orig_file"
+                    fi
+                    # If original case exists but lowercase does not, create symlink
+                    if [ -f "$orig_file" ] && [ ! -e "$lower_file" ]; then
+                        ln -s "$orig_case" "$lower_file"
+                    fi
+                done
+            done
+
+            echo "=== SDK header case fix complete ==="
+        }
+
+        _fix_sdk_case "$XWIN_SDK/sdk/include"
+
+        # Also verify key headers exist (debugging aid)
+        echo "=== SDK include verification ==="
+        for h in "um/Winsock2.h" "um/Windows.h" "shared/GuidDef.h" "ucrt/stdlib.h"; do
+            if [ -f "$XWIN_SDK/sdk/include/$h" ]; then
+                echo "  OK: $h"
+            else
+                echo "  MISSING: $h"
+            fi
+        done
 
         export DEPOT_TOOLS_WIN_TOOLCHAIN=0
         flags+="
@@ -147,7 +296,8 @@ visual_studio_path=\"${XWIN_VS}\"
 visual_studio_version=\"2022\"
 windows_sdk_path=\"${XWIN_SDK}\"
 windows_sdk_version=\"${WIN_SDK_VER}\"
-wdk_path=\"\"
+wdk_path=\"${XWIN_SDK}\"
+visual_studio_runtime_dirs=\"${XWIN_VS}/VC/Tools/MSVC/$MSVC_VER/lib/x64\"
 use_lld=true"
         ;;
 
@@ -205,7 +355,7 @@ if grep -q 'chrome_pgo_phase' build/config/compiler/pgo/pgo.gni 2>/dev/null; the
         if [ ! -f "chrome/build/pgo_profiles/$PGO_PATH" ]; then
             echo "=== Fetching PGO profile for ${_PGO} ==="
             mkdir -p chrome/build/pgo_profiles
-            curl --limit-rate 10M -Lo "chrome/build/pgo_profiles/$PGO_PATH" \
+            curl -Lo "chrome/build/pgo_profiles/$PGO_PATH" \
                 "https://storage.googleapis.com/chromium-optimization-profiles/pgo_profiles/$PGO_PATH"
         fi
     fi
@@ -232,8 +382,9 @@ echo "=== Output: ${out} ==="
 echo "=== Generating build files ==="
 ./gn/out/gn gen "$out" --args="$flags"
 
-echo "=== Building cronet ==="
-ninja -C "$out" cronet
+NINJA_JOBS="${NINJA_JOBS:-$(nproc)}"
+echo "=== Building cronet (${NINJA_JOBS} parallel jobs) ==="
+ninja -j "$NINJA_JOBS" -C "$out" cronet
 
 echo ""
 echo "=== Build complete ==="

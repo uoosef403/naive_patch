@@ -1,8 +1,9 @@
 /*
  * cronet_request.cc -- HTTP request: URLRequest::Delegate implementation.
  */
-#include "tools/cronet/cronet_request.h"
+#include "net/tools/cronet/cronet_request.h"
 
+#include "base/containers/span.h"
 #include "base/functional/bind.h"
 #include "base/task/single_thread_task_runner.h"
 #include "net/base/elements_upload_data_stream.h"
@@ -11,7 +12,7 @@
 #include "net/base/upload_bytes_element_reader.h"
 #include "net/http/http_response_headers.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
-#include "tools/cronet/cronet_engine.h"
+#include "net/tools/cronet/cronet_engine.h"
 
 namespace {
 constexpr int kReadBufferSize = 65536;
@@ -96,7 +97,7 @@ void CronetRequest::StartOnIOThread() {
   // Upload body
   if (!upload_data_.empty()) {
     auto reader = std::make_unique<net::UploadBytesElementReader>(
-        upload_data_.data(), upload_data_.size());
+        base::as_byte_span(upload_data_));
     std::vector<std::unique_ptr<net::UploadElementReader>> readers;
     readers.push_back(std::move(reader));
     url_request_->set_upload(
@@ -162,11 +163,12 @@ void CronetRequest::OnResponseStarted(net::URLRequest* request,
 
   // Notify caller
   if (callbacks_.on_response_started) {
-    const char* status_text = "";
+    std::string status_text_str;
     if (request->response_headers()) {
-      status_text = request->response_headers()->GetStatusText().c_str();
+      status_text_str = request->response_headers()->GetStatusText();
     }
-    int result = callbacks_.on_response_started(this, status_code_, status_text,
+    int result = callbacks_.on_response_started(this, status_code_,
+                                                status_text_str.c_str(),
                                                 user_data_);
     if (result != 0) {
       request->Cancel();

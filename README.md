@@ -119,7 +119,7 @@ On push to `main`, a GitHub Release is created with `.tar.gz` bundles.
 
 ## How it works
 
-`patch_cronet/` is a Python module that does three things:
+`patch_cronet/` is a Python module that patches NaiveProxy's source tree:
 
 1. **Patches `BUILD.gn`** -- adds a `shared_library("cronet")` target to `net/BUILD.gn`
    and registers it in the root `gn_all` group.
@@ -131,6 +131,16 @@ On push to `main`, a GitHub Release is created with `.tar.gz` bundles.
    - `cronet_export.cc` -- `extern "C"` wrappers that delegate to the above.
 3. **Installs `build_cronet.sh`** -- GN args corrected from NaiveProxy's defaults
    (`enable_websockets=true`, proxy-specific flags removed).
+4. **Fixes cross-compilation** (needed for Windows builds from Linux):
+   - `setup_toolchain.py` -- injects synthetic INCLUDE/LIB/PATH environment
+     so Chromium's toolchain setup works without Visual Studio installed.
+   - `visual_studio_version.gni` -- makes `visual_studio_runtime_dirs`
+     an overridable string arg (Chromium hardcodes it as an empty list).
+   - `base/BUILD.gn` -- removes ATL source files (ATL headers aren't
+     available via xwin; nothing in `net/` uses ATL).
+5. **Fixes build system conflicts** with NaiveProxy's `build_with_chromium = false`:
+   - `perfetto.gni` -- forces embedder mode so perfetto doesn't try to
+     load standalone build files that don't exist in NaiveProxy's tree.
 
 The C++ shim is ~800 lines total. It talks directly to Chromium's internal APIs
 (`URLRequestContextBuilder`, `WebSocketChannel`, etc.) -- there is no

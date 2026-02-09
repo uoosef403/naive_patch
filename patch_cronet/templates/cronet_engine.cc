@@ -1,9 +1,10 @@
 /*
  * cronet_engine.cc -- Engine: IO thread, URLRequestContext construction.
  */
-#include "tools/cronet/cronet_engine.h"
+#include "net/tools/cronet/cronet_engine.h"
 
 #include "base/at_exit.h"
+#include "base/files/file_path.h"
 #include "base/functional/bind.h"
 #include "base/message_loop/message_pump_type.h"
 #include "base/synchronization/waitable_event.h"
@@ -109,7 +110,7 @@ void CronetEngine::InitOnIOThread(const CronetEngineParams* params,
     net::URLRequestContextBuilder::HttpCacheParams cache_params;
     cache_params.type =
         net::URLRequestContextBuilder::HttpCacheParams::DISK_SIMPLE;
-    cache_params.path = base::FilePath(params->cache_path);
+    cache_params.path = base::FilePath::FromUTF8Unsafe(params->cache_path);
     if (params->cache_max_bytes > 0) {
       cache_params.max_size = params->cache_max_bytes;
     }
