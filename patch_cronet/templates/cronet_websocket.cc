@@ -223,7 +223,12 @@ void CronetWebSocket::OnSSLCertificateError(
     int net_error,
     const net::SSLInfo& ssl_info,
     bool fatal) {
-  // Reject invalid certificates by default.
+  // If engine has insecure_skip_verify, accept the certificate.
+  if (engine_->insecure_skip_verify()) {
+    ssl_error_callbacks->ContinueSSLRequest();
+    return;
+  }
+  // Otherwise reject invalid certificates.
   ssl_error_callbacks->CancelSSLRequest(net_error, &ssl_info);
 }
 

@@ -27,6 +27,25 @@ extern "C" {
 #endif
 
 /* -------------------------------------------------------------------------- */
+/*  Constants                                                                  */
+/* -------------------------------------------------------------------------- */
+
+/* TLS version constants for CronetEngineParams.tls_min/max_version */
+#define CRONET_TLS_VERSION_DEFAULT  0
+#define CRONET_TLS_VERSION_TLS_1_0  0x0301
+#define CRONET_TLS_VERSION_TLS_1_1  0x0302
+#define CRONET_TLS_VERSION_TLS_1_2  0x0303
+#define CRONET_TLS_VERSION_TLS_1_3  0x0304
+
+/* Request priority constants for CronetRequestParams.priority */
+#define CRONET_PRIORITY_DEFAULT  0
+#define CRONET_PRIORITY_IDLE     1
+#define CRONET_PRIORITY_LOWEST   2
+#define CRONET_PRIORITY_LOW      3
+#define CRONET_PRIORITY_MEDIUM   4
+#define CRONET_PRIORITY_HIGHEST  5
+
+/* -------------------------------------------------------------------------- */
 /*  Opaque handle types                                                       */
 /* -------------------------------------------------------------------------- */
 
@@ -47,7 +66,56 @@ typedef struct CronetEngineParams {
     const char* proxy_url;           /* NULL = direct, e.g. "http://proxy:8080" */
     const char* cache_path;          /* NULL = in-memory only */
     int         cache_max_bytes;     /* 0 = default */
+
+    /* --- TLS configuration --- */
+    int         insecure_skip_verify;  /* 1 = accept any TLS certificate */
+    const char* custom_ca_pem;         /* NULL or PEM-encoded root CA bundle */
+    int         tls_min_version;       /* 0 = default. Use CRONET_TLS_VERSION_* */
+    int         tls_max_version;       /* 0 = default. Use CRONET_TLS_VERSION_* */
+
+    /* --- Cookie configuration --- */
+    int         enable_cookies;        /* 1 = enable in-memory cookie jar */
 } CronetEngineParams;
+
+/* -------------------------------------------------------------------------- */
+/*  Per-request parameters (optional, call set_params before start)           */
+/* -------------------------------------------------------------------------- */
+
+typedef struct CronetRequestParams {
+    int         timeout_ms;            /* 0 = no timeout. Overall request timeout */
+    int         connect_timeout_ms;    /* 0 = no connect timeout */
+    int         max_redirects;         /* -1 = default (20), 0 = no auto-follow */
+    int         priority;              /* CRONET_PRIORITY_*. 0 = DEFAULT */
+    int         disable_cache;         /* 1 = bypass cache for this request */
+} CronetRequestParams;
+
+/* -------------------------------------------------------------------------- */
+/*  TLS connection info (populated after on_response_started)                 */
+/* -------------------------------------------------------------------------- */
+
+typedef struct CronetTlsInfo {
+    uint16_t    cipher_suite;          /* IANA cipher suite ID */
+    uint16_t    tls_version;           /* 0x0303=TLS1.2, 0x0304=TLS1.3, etc. */
+    const char* negotiated_protocol;   /* "h2", "h3", "http/1.1" */
+    int         cert_chain_count;      /* Certs in chain (access via get_tls_cert_pem) */
+} CronetTlsInfo;
+
+/* -------------------------------------------------------------------------- */
+/*  Request timing info (populated after on_completed)                        */
+/* -------------------------------------------------------------------------- */
+
+typedef struct CronetTimingInfo {
+    int64_t dns_start_ms;              /* Milliseconds from request start */
+    int64_t dns_end_ms;
+    int64_t connect_start_ms;
+    int64_t connect_end_ms;
+    int64_t ssl_start_ms;
+    int64_t ssl_end_ms;
+    int64_t send_start_ms;
+    int64_t send_end_ms;
+    int64_t first_byte_ms;            /* Time to first response byte */
+    int64_t completion_ms;            /* Total time */
+} CronetTimingInfo;
 
 /* -------------------------------------------------------------------------- */
 /*  HTTP request callbacks                                                    */
@@ -116,6 +184,23 @@ CRONET_EXPORT CronetEngine* cronet_engine_create(const CronetEngineParams* param
 CRONET_EXPORT void          cronet_engine_destroy(CronetEngine* engine);
 
 /* -------------------------------------------------------------------------- */
+/*  Cookie management (engine-level, shared across requests)                  */
+/* -------------------------------------------------------------------------- */
+
+/* Set a cookie. |cookie_line| is in Set-Cookie format. |url| is the scope. */
+CRONET_EXPORT void cronet_engine_set_cookie(CronetEngine* engine,
+                                             const char* url,
+                                             const char* cookie_line);
+
+/* Get all cookies for a URL. Returns semicolon-separated "name=value" string.
+ * Caller MUST free the returned string with cronet_free_string(). */
+CRONET_EXPORT char* cronet_engine_get_cookies(CronetEngine* engine,
+                                               const char* url);
+
+/* Delete all cookies. */
+CRONET_EXPORT void cronet_engine_clear_cookies(CronetEngine* engine);
+
+/* -------------------------------------------------------------------------- */
 /*  HTTP request lifecycle                                                    */
 /* -------------------------------------------------------------------------- */
 
@@ -136,9 +221,18 @@ CRONET_EXPORT void cronet_request_set_body(CronetRequest* req,
                                            const char* data,
                                            size_t length);
 
+/* Set per-request parameters. Call before cronet_request_start(). */
+CRONET_EXPORT void cronet_request_set_params(CronetRequest* req,
+                                              const CronetRequestParams* params);
+
 CRONET_EXPORT void cronet_request_start(CronetRequest* req);
 CRONET_EXPORT void cronet_request_cancel(CronetRequest* req);
 CRONET_EXPORT void cronet_request_destroy(CronetRequest* req);
+
+/* Block until the request completes. Returns net_error (0 = OK).
+ * |timeout_ms| <= 0 means wait indefinitely.
+ * Do NOT call from within a Cronet callback (deadlock). */
+CRONET_EXPORT int cronet_request_wait(CronetRequest* req, int timeout_ms);
 
 /* Response inspection (valid after on_response_started) */
 CRONET_EXPORT int         cronet_request_get_status_code(CronetRequest* req);
@@ -150,6 +244,28 @@ CRONET_EXPORT const char* cronet_request_get_header_name(CronetRequest* req,
 CRONET_EXPORT const char* cronet_request_get_header_value(CronetRequest* req,
                                                            int index);
 CRONET_EXPORT const char* cronet_request_get_negotiated_protocol(CronetRequest* req);
+
+/* Final URL after all redirects (valid after on_response_started). */
+CRONET_EXPORT const char* cronet_request_get_url(CronetRequest* req);
+
+/* Response Content-Length, or -1 if unknown. */
+CRONET_EXPORT int64_t cronet_request_get_content_length(CronetRequest* req);
+
+/* HTTP version string: "HTTP/1.0", "HTTP/1.1", "HTTP/2", "HTTP/3". */
+CRONET_EXPORT const char* cronet_request_get_http_version(CronetRequest* req);
+
+/* TLS connection info. Returns 0 on success, -1 if not TLS. */
+CRONET_EXPORT int cronet_request_get_tls_info(CronetRequest* req,
+                                               CronetTlsInfo* out);
+
+/* PEM-encoded certificate at |index| in the peer's cert chain.
+ * Returns NULL if index is out of range. Pointer valid until request destroyed. */
+CRONET_EXPORT const char* cronet_request_get_tls_cert_pem(CronetRequest* req,
+                                                           int index);
+
+/* Request timing (valid after on_completed). Returns 0 on success, -1 if N/A. */
+CRONET_EXPORT int cronet_request_get_timing(CronetRequest* req,
+                                             CronetTimingInfo* out);
 
 /* -------------------------------------------------------------------------- */
 /*  WebSocket lifecycle                                                       */
@@ -180,6 +296,17 @@ CRONET_EXPORT void cronet_websocket_close(CronetWebSocket* ws,
                                            const char* reason);
 
 CRONET_EXPORT void cronet_websocket_destroy(CronetWebSocket* ws);
+
+/* -------------------------------------------------------------------------- */
+/*  Utility                                                                   */
+/* -------------------------------------------------------------------------- */
+
+/* Convert a Chromium net error code to a human-readable string.
+ * Returns pointer to thread-local storage (no need to free). */
+CRONET_EXPORT const char* cronet_error_to_string(int net_error);
+
+/* Free a string allocated by the library (e.g. from cronet_engine_get_cookies). */
+CRONET_EXPORT void cronet_free_string(char* str);
 
 #ifdef __cplusplus
 }  /* extern "C" */

@@ -27,12 +27,20 @@ struct CronetEngine {
   net::URLRequestContext* context() const { return context_.get(); }
   base::Thread* io_thread() { return &io_thread_; }
 
+  bool insecure_skip_verify() const { return insecure_skip_verify_; }
+
+  // Cookie management (blocks until operation completes on IO thread)
+  void SetCookie(const char* url, const char* cookie_line);
+  char* GetCookies(const char* url);
+  void ClearCookies();
+
  private:
   void InitOnIOThread(const CronetEngineParams* params,
                       base::WaitableEvent* event);
 
   base::Thread io_thread_;
   std::unique_ptr<net::URLRequestContext> context_;
+  bool insecure_skip_verify_ = false;
 
   // Prevents multiple engines from fighting over AtExitManager.
   static std::atomic<int> engine_count_;
