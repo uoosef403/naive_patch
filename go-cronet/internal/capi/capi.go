@@ -1,8 +1,10 @@
 // Package capi provides low-level CGo bindings to libcronet.
 package capi
 
+// Platform-specific library linking is handled by files in the platform/ subdirectory
+// with appropriate build tags (linux/amd64, android/arm64, windows/amd64, etc.)
+
 /*
-#cgo LDFLAGS: -L${SRCDIR}/../../lib -lcronet -Wl,-rpath,${SRCDIR}/../../lib
 #cgo CFLAGS: -I${SRCDIR}/../../include
 #include "cronet_api.h"
 #include <stdlib.h>

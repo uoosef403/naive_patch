@@ -2,6 +2,7 @@ package cronet_test
 
 import (
 	"io"
+	"net/http"
 	"testing"
 
 	"go-cronet"
@@ -33,14 +34,22 @@ func TestInsecureSkipVerify(t *testing.T) {
 func TestInsecureSkipVerifyDisabled(t *testing.T) {
 	setupTestServers(t)
 	// Self-signed cert should fail without InsecureSkipVerify
-	client, err := cronet.NewClient()
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+	cfg := cronet.EngineConfig{
+		EnableHTTP2:        true,
+		EnableBrotli:       true,
+		InsecureSkipVerify: false, // explicitly disabled
 	}
-	defer client.Close()
+	engine, err := cronet.NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	defer engine.Close()
 
-	_, err = client.Get(httpsURL("/echo"))
+	transport := &cronet.Transport{Engine: engine}
+	req, _ := http.NewRequest("GET", httpsURL("/echo"), nil)
+	resp, err := transport.RoundTrip(req)
 	if err == nil {
+		resp.Body.Close()
 		t.Fatal("expected TLS error for self-signed cert")
 	}
 	t.Logf("got expected error: %v", err)

@@ -69,6 +69,7 @@ typedef struct CronetEngineParams {
 
     /* --- TLS configuration --- */
     int         insecure_skip_verify;  /* 1 = accept any TLS certificate */
+    int         enforce_strict_security; /* 1 = enable strict security (SameSite, Secure cookies). 0 = permissive (default). */
     const char* custom_ca_pem;         /* NULL or PEM-encoded root CA bundle */
     int         tls_min_version;       /* 0 = default. Use CRONET_TLS_VERSION_* */
     int         tls_max_version;       /* 0 = default. Use CRONET_TLS_VERSION_* */

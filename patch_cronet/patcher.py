@@ -31,6 +31,8 @@ def run(src_dir: Path) -> None:
     gn_patches.patch_visual_studio_version_gni(src_dir)
     gn_patches.patch_setup_toolchain_py(src_dir)
     gn_patches.patch_base_build_gn(src_dir)
+    gn_patches.patch_boringssl_build_gn(src_dir)
+    gn_patches.patch_gcc_toolchain_gni(src_dir)
 
     # 2. Copy template files to their destinations
     templates_dir = Path(__file__).parent / "templates"

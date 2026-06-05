@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "base/synchronization/waitable_event.h"
 #include "net/http/http_request_headers.h"
 #include "url/gurl.h"
 #include "net/websockets/websocket_channel.h"
@@ -15,15 +16,18 @@
 #include "net/tools/cronet/cronet_api.h"
 
 struct CronetEngine;
+class CronetWebSocketAdapter;
 
-struct CronetWebSocket : public net::WebSocketEventInterface {
+struct CronetWebSocket {
   CronetWebSocket(CronetEngine* engine,
                   const CronetWebSocketCallbacks* callbacks,
                   void* user_data);
-  ~CronetWebSocket() override;
+  ~CronetWebSocket();
 
   CronetWebSocket(const CronetWebSocket&) = delete;
   CronetWebSocket& operator=(const CronetWebSocket&) = delete;
+
+  CronetEngine* engine() const { return engine_; }
 
   void AddHeader(const char* name, const char* value);
   void Connect(const char* url,
@@ -32,50 +36,20 @@ struct CronetWebSocket : public net::WebSocketEventInterface {
   void Send(const char* data, size_t length, int is_binary);
   void Close(uint16_t code, const char* reason);
 
-  // WebSocketEventInterface overrides
-  void OnCreateURLRequest(net::URLRequest* request) override;
-  int OnURLRequestConnected(
-      net::URLRequest* request,
-      const net::TransportInfo& info,
-      net::CompletionOnceCallback callback) override;
-  void OnAddChannelResponse(
-      std::unique_ptr<net::WebSocketHandshakeResponseInfo> response,
-      const std::string& selected_subprotocol,
-      const std::string& extensions) override;
-  void OnDataFrame(bool fin,
-                   WebSocketMessageType type,
-                   base::span<const char> payload) override;
-  bool HasPendingDataFrames() override;
-  void OnSendDataFrameDone() override;
-  void OnClosingHandshake() override;
-  void OnDropChannel(bool was_clean,
-                     uint16_t code,
-                     const std::string& reason) override;
-  void OnFailChannel(const std::string& message,
-                     int net_error,
-                     std::optional<int> response_code) override;
-  void OnStartOpeningHandshake(
-      std::unique_ptr<net::WebSocketHandshakeRequestInfo> request) override;
-  void OnSSLCertificateError(
-      std::unique_ptr<net::WebSocketEventInterface::SSLErrorCallbacks>
-          ssl_error_callbacks,
-      const GURL& url,
-      int net_error,
-      const net::SSLInfo& ssl_info,
-      bool fatal) override;
-  int OnAuthRequired(
-      const net::AuthChallengeInfo& auth_info,
-      scoped_refptr<net::HttpResponseHeaders> response_headers,
-      const net::IPEndPoint& host_port_pair,
-      base::OnceCallback<void(const net::AuthCredentials*)> callback,
-      std::optional<net::AuthCredentials>* credentials) override;
+  // Event handlers called by CronetWebSocketAdapter
+  void OnConnected(const std::string& selected_subprotocol);
+  void OnMessage(const std::string& data, int is_binary);
+  void OnClosed(bool was_clean, uint16_t code, const std::string& reason);
+  void OnError(int net_error, const std::string& message);
+  void StartReading();
 
  private:
   void ConnectOnIOThread(const std::string& url,
                          std::vector<std::string> subprotocols);
   void SendOnIOThread(std::string data, int is_binary);
   void CloseOnIOThread(uint16_t code, const std::string& reason);
-  void DestroyOnIOThread();
+  void DestroyOnIOThread(base::WaitableEvent* done);
+  void ReadFramesOnIOThread();
 
   CronetEngine* engine_;
   CronetWebSocketCallbacks callbacks_;
@@ -83,6 +57,7 @@ struct CronetWebSocket : public net::WebSocketEventInterface {
 
   net::HttpRequestHeaders extra_headers_;
   std::unique_ptr<net::WebSocketChannel> channel_;
+  CronetWebSocketAdapter* adapter_ = nullptr;  // Non-owning, for Detach()
 
   // Frame reassembly for multi-frame messages
   std::string message_buffer_;

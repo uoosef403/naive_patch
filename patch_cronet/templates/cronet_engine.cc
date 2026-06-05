@@ -6,11 +6,15 @@
 #include <cstdlib>
 
 #include "base/at_exit.h"
+#include "base/command_line.h"
+#include "base/feature_list.h"
 #include "base/files/file_path.h"
 #include "base/functional/bind.h"
 #include "base/message_loop/message_pump_type.h"
 #include "base/synchronization/waitable_event.h"
 #include "base/task/single_thread_task_runner.h"
+#include "base/task/thread_pool.h"
+#include "base/task/thread_pool/thread_pool_instance.h"
 #include "net/cert/cert_verifier.h"
 #include "net/cert/x509_certificate.h"
 #include "net/cookies/canonical_cookie.h"
@@ -87,10 +91,28 @@ std::unique_ptr<base::AtExitManager> CronetEngine::at_exit_;
 std::mutex CronetEngine::at_exit_mutex_;
 
 CronetEngine::CronetEngine() : io_thread_("CronetIO") {
+  // Strictly once-per-process initialization of Chromium globals.
+  static bool globals_initialized = []() {
+    if (!base::CommandLine::InitializedForCurrentProcess()) {
+      base::CommandLine::Init(0, nullptr);
+    }
+    if (!base::FeatureList::GetInstance()) {
+      // Default to permissive (legacy) mode for cookies.
+      std::string disable_features = "SameSiteByDefaultCookies,CookiesWithoutSameSiteMustBeSecure,PartitionedCookies,SchemefulSameSite";
+      base::FeatureList::InitInstance(std::string(), disable_features);
+    }
+    if (!base::ThreadPoolInstance::Get()) {
+      base::ThreadPoolInstance::CreateAndStartWithDefaultParams("cronet");
+    }
+    // We intentionally leak the AtExitManager to prevent destruction-order SIGTRAP.
+    static base::AtExitManager* leaked_manager = new base::AtExitManager();
+    (void)leaked_manager;
+    return true;
+  }();
+  (void)globals_initialized;
+
   std::lock_guard<std::mutex> lock(at_exit_mutex_);
-  if (engine_count_.fetch_add(1) == 0) {
-    at_exit_ = std::make_unique<base::AtExitManager>();
-  }
+  engine_count_.fetch_add(1);
 }
 
 CronetEngine::~CronetEngine() {
@@ -112,7 +134,10 @@ CronetEngine::~CronetEngine() {
 
   std::lock_guard<std::mutex> lock(at_exit_mutex_);
   if (engine_count_.fetch_sub(1) == 1) {
-    at_exit_.reset();
+    // We intentionally do NOT reset at_exit_.
+    // Chromium's global state (AtExitManager, ThreadPool) is not designed
+    // to be destroyed and re-initialized in the same process.
+    // By leaving it alive, we avoid SIGTRAP/CHECK failures on next engine create.
   }
 }
 
@@ -214,46 +239,66 @@ void CronetEngine::InitOnIOThread(const CronetEngineParams* params,
 void CronetEngine::SetCookie(const char* url, const char* cookie_line) {
   if (!url || !cookie_line || !context_) return;
 
-  GURL gurl(url);
-  if (!gurl.is_valid()) return;
-
+  std::string url_str(url);
+  std::string cookie_str(cookie_line);
   base::WaitableEvent done;
   io_thread_.task_runner()->PostTask(
       FROM_HERE,
       base::BindOnce(
-          [](net::URLRequestContext* ctx, const GURL& gurl,
-             const std::string& cookie_line, base::WaitableEvent* event) {
-            auto cookie = net::CanonicalCookie::CreateForTesting(
-                gurl, cookie_line, base::Time::Now());
+           [](net::URLRequestContext* ctx, const std::string& url_str,
+              const std::string& cookie_line, base::WaitableEvent* event) {
+            if (!ctx->cookie_store()) {
+              event->Signal();
+              return;
+            }
+            GURL gurl(url_str);
+            if (!gurl.is_valid()) {
+              event->Signal();
+              return;
+            }
+            net::CookieInclusionStatus status;
+            auto cookie = net::CanonicalCookie::Create(
+                gurl, cookie_line, base::Time::Now(),
+                std::nullopt,
+                std::nullopt,
+                net::CookieSourceType::kOther,
+                &status);
             if (!cookie) {
               event->Signal();
               return;
             }
-            ctx->cookie_store()->SetCanonicalCookieAsync(
-                std::move(cookie), gurl,
-                net::CookieOptions::MakeAllInclusive(),
+            // Always use unsafe method to avoid DCHECK crash in SetCanonicalCookie
+            ctx->cookie_store()->SetUnsafeCanonicalCookieForTestAsync(
+                std::move(cookie),
                 base::BindOnce(
                     [](base::WaitableEvent* e,
                        net::CookieAccessResult) { e->Signal(); },
                     event));
           },
-          context_.get(), gurl, std::string(cookie_line), &done));
+          context_.get(), std::move(url_str), std::move(cookie_str), &done));
   done.Wait();
 }
 
 char* CronetEngine::GetCookies(const char* url) {
   if (!url || !context_) return nullptr;
 
-  GURL gurl(url);
-  if (!gurl.is_valid()) return nullptr;
-
+  std::string url_str(url);
   std::string result;
   base::WaitableEvent done;
   io_thread_.task_runner()->PostTask(
       FROM_HERE,
       base::BindOnce(
-          [](net::URLRequestContext* ctx, const GURL& gurl,
+          [](net::URLRequestContext* ctx, const std::string& url_str,
              std::string* result, base::WaitableEvent* event) {
+            if (!ctx->cookie_store()) {
+              event->Signal();
+              return;
+            }
+            GURL gurl(url_str);
+            if (!gurl.is_valid()) {
+              event->Signal();
+              return;
+            }
             ctx->cookie_store()->GetCookieListWithOptionsAsync(
                 gurl, net::CookieOptions::MakeAllInclusive(),
                 net::CookiePartitionKeyCollection(),
@@ -271,7 +316,7 @@ char* CronetEngine::GetCookies(const char* url) {
                     },
                     result, event));
           },
-          context_.get(), gurl, &result, &done));
+          context_.get(), std::move(url_str), &result, &done));
   done.Wait();
 
   if (result.empty()) return nullptr;
@@ -289,6 +334,10 @@ void CronetEngine::ClearCookies() {
       FROM_HERE,
       base::BindOnce(
           [](net::URLRequestContext* ctx, base::WaitableEvent* event) {
+            if (!ctx->cookie_store()) {
+              event->Signal();
+              return;
+            }
             ctx->cookie_store()->DeleteAllAsync(
                 base::BindOnce(
                     [](base::WaitableEvent* e, uint32_t) { e->Signal(); },

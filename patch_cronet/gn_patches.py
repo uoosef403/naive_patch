@@ -226,6 +226,117 @@ def patch_base_build_gn(src_dir: Path) -> None:
         print("  base/BUILD.gn: ATL source lines not found, skipping")
 
 
+def patch_boringssl_build_gn(src_dir: Path) -> None:
+    """Force OPENSSL_NO_ASM in BoringSSL to eliminate AVX-512 assembly.
+
+    BoringSSL ships pre-generated GAS assembly with AVX-512 instructions
+    (AES-GCM, etc.) that cause SIGILL on CPUs without AVX-512.  The is_msan
+    branch already disables assembly and defines OPENSSL_NO_ASM; we just
+    force that branch unconditionally.
+    """
+    build_gn = src_dir / "third_party" / "boringssl" / "BUILD.gn"
+    if not build_gn.exists():
+        print("  boringssl/BUILD.gn not found, skipping")
+        return
+
+    text = build_gn.read_text()
+    marker = "# cronet-patched: force no_asm"
+    if marker in text:
+        print("  boringssl/BUILD.gn already patched, skipping")
+        return
+
+    old = "if (is_msan) {"
+    if old not in text:
+        print("  boringssl/BUILD.gn: is_msan anchor not found, skipping")
+        return
+
+    text = text.replace(old, marker + "\nif (true) {", 1)
+    build_gn.write_text(text)
+    print("  patched boringssl/BUILD.gn: forced OPENSSL_NO_ASM "
+          "(eliminates AVX-512 assembly)")
+
+
+def patch_gcc_toolchain_gni(src_dir: Path) -> None:
+    """Pass extra_cflags from GN args to the Linux clang_x64 toolchain.
+
+    gcc_toolchain.gni supports extra_cflags as a template parameter, but the
+    Linux clang_x64 toolchain never passes it, so extra_cflags set in args.gn
+    is silently ignored.  We patch clang_x64 to forward cronet_extra_cflags
+    as extra_cflags, and declare the variables in BUILDCONFIG.gn so they're
+    globally visible.
+    """
+    # 1. Declare cronet_extra_cflags in BUILDCONFIG.gn (globally visible)
+    bc = src_dir / "build" / "config" / "BUILDCONFIG.gn"
+    if bc.exists():
+        text = bc.read_text()
+        marker = "# cronet-patched: extra_cflags declare"
+        if marker not in text:
+            anchor = "declare_args() {"
+            if anchor in text:
+                decl = f'''{marker}
+declare_args() {{
+  cronet_extra_cflags = ""
+  cronet_extra_cxxflags = ""
+  cronet_extra_ldflags = ""
+}}
+
+'''
+                text = text.replace(anchor, decl + anchor, 1)
+                bc.write_text(text)
+                print("  patched BUILDCONFIG.gn: declared "
+                      "cronet_extra_cflags/ldflags in declare_args")
+            else:
+                print("  BUILDCONFIG.gn: declare_args anchor not found")
+        else:
+            print("  BUILDCONFIG.gn already patched, skipping")
+
+    # 2. Patch clang_x64 in linux/BUILD.gn to pass extra_cflags
+    build_gn = src_dir / "build" / "toolchain" / "linux" / "BUILD.gn"
+    if not build_gn.exists():
+        print("  build/toolchain/linux/BUILD.gn not found, skipping")
+        return
+
+    text = build_gn.read_text()
+    marker2 = "# cronet-patched: extra_cflags"
+    if marker2 in text:
+        print("  linux/BUILD.gn already patched, skipping")
+        return
+
+    old = '''clang_toolchain("clang_x64") {
+  # Output linker map files for binary size analysis.
+  enable_linker_map = true
+
+  toolchain_args = {
+    current_cpu = "x64"
+    current_os = "linux"
+  }
+}'''
+
+    if old not in text:
+        print("  linux/BUILD.gn: clang_x64 anchor not found, skipping")
+        return
+
+    new = f'''clang_toolchain("clang_x64") {{
+  {marker2}
+  extra_cflags = cronet_extra_cflags
+  extra_cxxflags = cronet_extra_cflags
+  extra_ldflags = cronet_extra_ldflags
+
+  # Output linker map files for binary size analysis.
+  enable_linker_map = true
+
+  toolchain_args = {{
+    current_cpu = "x64"
+    current_os = "linux"
+  }}
+}}'''
+
+    text = text.replace(old, new, 1)
+    build_gn.write_text(text)
+    print("  patched linux/BUILD.gn: clang_x64 forwards "
+          "cronet_extra_cflags as extra_cflags")
+
+
 def patch_root_build_gn(src_dir: Path) -> None:
     """Insert '//net:cronet' into group("gn_all") deps in the root BUILD.gn."""
     build_gn = src_dir / "BUILD.gn"

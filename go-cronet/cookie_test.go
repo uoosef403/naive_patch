@@ -112,6 +112,49 @@ func TestServerSetCookie(t *testing.T) {
 	}
 }
 
+func TestServerSetCookieHTTP(t *testing.T) {
+	setupTestServers(t)
+	cfg := cronet.EngineConfig{
+		EnableHTTP2:   true,
+		EnableBrotli:  true,
+		EnableCookies: true,
+	}
+	engine, err := cronet.NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	defer engine.Close()
+
+	transport := &cronet.Transport{Engine: engine}
+
+	// First request sets cookies via server over plain HTTP
+	req, _ := http.NewRequest("GET", httpURL("/cookies/set?color=blue&shape=circle"), nil)
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip set: %v", err)
+	}
+	resp.Body.Close()
+
+	// Second request should send cookies back
+	req2, _ := http.NewRequest("GET", httpURL("/cookies/get"), nil)
+	resp2, err := transport.RoundTrip(req2)
+	if err != nil {
+		t.Fatalf("RoundTrip get: %v", err)
+	}
+	defer resp2.Body.Close()
+
+	body, _ := io.ReadAll(resp2.Body)
+	var cookies map[string]string
+	json.Unmarshal(body, &cookies)
+
+	if cookies["color"] != "blue" {
+		t.Fatalf("expected color=blue, got %v", cookies)
+	}
+	if cookies["shape"] != "circle" {
+		t.Fatalf("expected shape=circle, got %v", cookies)
+	}
+}
+
 func TestCookieJarInterface(t *testing.T) {
 	setupTestServers(t)
 	cfg := cronet.EngineConfig{

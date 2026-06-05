@@ -4,19 +4,22 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 
 	"go-cronet/internal/capi"
 )
 
 // WebSocket represents a WebSocket connection.
 type WebSocket struct {
-	ptr      *capi.WebSocket
-	engine   *Engine
-	handleID uint64
-	messages chan wsMessage
-	connErr  chan error
-	done     chan struct{}
-	closeOnce sync.Once
+	ptr       *capi.WebSocket
+	engine    *Engine
+	handleID  uint64
+	messages  chan wsMessage
+	connErr   chan error
+	done      chan struct{}
+	doneOnce  sync.Once // protects close(done)
+	mu        sync.Mutex
+	destroyed bool
 }
 
 type wsMessage struct {
@@ -54,7 +57,7 @@ func (e *Engine) DialWebSocket(url string, headers http.Header) (*WebSocket, err
 			}
 		},
 		OnClosed: func(wasClean bool, code uint16, reason string) {
-			ws.closeOnce.Do(func() { close(ws.done) })
+			ws.doneOnce.Do(func() { close(ws.done) })
 		},
 		OnError: func(netError int, message string) {
 			err := &NetError{Code: netError, Message: message}
@@ -62,7 +65,7 @@ func (e *Engine) DialWebSocket(url string, headers http.Header) (*WebSocket, err
 			case ws.connErr <- err:
 			default:
 			}
-			ws.closeOnce.Do(func() { close(ws.done) })
+			ws.doneOnce.Do(func() { close(ws.done) })
 		},
 	}
 
@@ -107,6 +110,12 @@ func (ws *WebSocket) ReadMessage() (data []byte, isBinary bool, err error) {
 
 // WriteMessage sends a message over the WebSocket.
 func (ws *WebSocket) WriteMessage(data []byte, binary bool) error {
+	ws.mu.Lock()
+	destroyed := ws.destroyed
+	ws.mu.Unlock()
+	if destroyed {
+		return fmt.Errorf("cronet: websocket closed")
+	}
 	select {
 	case <-ws.done:
 		return fmt.Errorf("cronet: websocket closed")
@@ -116,14 +125,31 @@ func (ws *WebSocket) WriteMessage(data []byte, binary bool) error {
 	return nil
 }
 
-// Close closes the WebSocket connection.
+// Close closes the WebSocket connection gracefully.
+// It initiates the close handshake, waits for completion (up to 5s),
+// then cleans up all resources.
 func (ws *WebSocket) Close(code uint16, reason string) error {
+	ws.mu.Lock()
+	if ws.destroyed {
+		ws.mu.Unlock()
+		return nil
+	}
+	ws.destroyed = true
+	ws.mu.Unlock()
+
+	// Initiate WebSocket close handshake
 	capi.WebSocketClose(ws.ptr, code, reason)
-	// Wait briefly for close to complete
+
+	// Wait for the close handshake to complete or timeout
 	select {
 	case <-ws.done:
-	default:
+	case <-time.After(5 * time.Second):
 	}
+
+	// Ensure done is closed so ReadMessage/WriteMessage return immediately
+	ws.doneOnce.Do(func() { close(ws.done) })
+
+	// Clean up C resources
 	capi.UnregisterWSHandle(ws.handleID)
 	capi.WebSocketDestroy(ws.ptr)
 	return nil

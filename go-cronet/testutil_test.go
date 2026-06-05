@@ -1,6 +1,7 @@
 package cronet_test
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -19,6 +20,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 // testServer holds the shared test HTTPS + HTTP servers.
@@ -26,6 +29,8 @@ var testServer struct {
 	once      sync.Once
 	httpsAddr string // e.g. "127.0.0.1:14443"
 	httpAddr  string // e.g. "127.0.0.1:14080"
+	wsAddr    string // raw TCP WebSocket server (ws://)
+	wssAddr   string // raw TLS WebSocket server (wss://)
 	caPEM     string // PEM-encoded CA cert
 	tlsCert   tls.Certificate
 }
@@ -118,6 +123,42 @@ func setupTestServers(t *testing.T) {
 		testServer.httpAddr = httpLn.Addr().String()
 		httpServer := &http.Server{Handler: mux}
 		go httpServer.Serve(httpLn)
+
+		// Start raw TCP WebSocket server (ws://)
+		wsLn, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen WS: %v", err)
+		}
+		testServer.wsAddr = wsLn.Addr().String()
+		go func() {
+			for {
+				conn, err := wsLn.Accept()
+				if err != nil {
+					return
+				}
+				go handleWSConnRaw(conn)
+			}
+		}()
+
+		// Start raw TLS WebSocket server (wss://)
+		wssLn, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen WSS: %v", err)
+		}
+		wssTLSConfig := &tls.Config{
+			Certificates: []tls.Certificate{tlsCert},
+		}
+		wssTLSLn := tls.NewListener(wssLn, wssTLSConfig)
+		testServer.wssAddr = wssLn.Addr().String()
+		go func() {
+			for {
+				conn, err := wssTLSLn.Accept()
+				if err != nil {
+					return
+				}
+				go handleWSConnRawTLS(conn)
+			}
+		}()
 
 		// Write CA PEM to temp file for tests that need a path
 		os.WriteFile("/tmp/cronet_test_ca.pem", caPEM, 0644)
@@ -246,6 +287,9 @@ func testMux() *http.ServeMux {
 		json.NewEncoder(w).Encode(flattenHeaders(r.Header))
 	})
 
+	// /ws/echo - WebSocket echo server (RFC 6455, no external deps)
+	mux.HandleFunc("/ws/echo", handleWebSocketEcho)
+
 	return mux
 }
 
@@ -265,6 +309,86 @@ func httpURL(path string) string {
 	return "http://" + testServer.httpAddr + path
 }
 
+func wsURL(path string) string {
+	return "ws://" + testServer.httpAddr + path
+}
+
+func wssURL(path string) string {
+	return "wss://" + testServer.httpsAddr + path
+}
+
 func newRequest(method, url string, body io.Reader) (*http.Request, error) {
 	return http.NewRequest(method, url, body)
 }
+
+func handleWebSocketEcho(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
+	defer cancel()
+
+	conn, err := websocket.Accept(w, r, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[ws-echo] accept error: %v\n", err)
+		return
+	}
+	defer conn.Close(websocket.StatusInternalError, "server error")
+
+	fmt.Fprintf(os.Stderr, "[ws-echo] connection accepted\n")
+
+	for {
+		msgType, data, err := conn.Read(ctx)
+		if err != nil {
+			if websocket.CloseStatus(err) == websocket.StatusNormalClosure {
+				fmt.Fprintf(os.Stderr, "[ws-echo] client closed normally\n")
+				return
+			}
+			fmt.Fprintf(os.Stderr, "[ws-echo] read error: %v\n", err)
+			return
+		}
+
+		fmt.Fprintf(os.Stderr, "[ws-echo] received %d bytes, type=%v\n", len(data), msgType)
+
+		err = conn.Write(ctx, msgType, data)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[ws-echo] write error: %v\n", err)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "[ws-echo] echoed back\n")
+	}
+}
+
+func handleWSConnRaw(conn net.Conn) {
+	defer conn.Close()
+
+	server := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+				http.Error(w, "not a websocket request", http.StatusBadRequest)
+				return
+			}
+			handleWebSocketEcho(w, r)
+		}),
+		ReadTimeout:  time.Minute,
+		WriteTimeout: time.Minute,
+	}
+	server.Serve(&singleConnListener{conn: conn})
+}
+
+func handleWSConnRawTLS(conn net.Conn) {
+	handleWSConnRaw(conn)
+}
+
+type singleConnListener struct {
+	conn net.Conn
+	used bool
+}
+
+func (l *singleConnListener) Accept() (net.Conn, error) {
+	if l.used {
+		select {}
+	}
+	l.used = true
+	return l.conn, nil
+}
+
+func (l *singleConnListener) Close() error   { return nil }
+func (l *singleConnListener) Addr() net.Addr { return l.conn.LocalAddr() }

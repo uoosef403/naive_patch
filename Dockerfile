@@ -26,9 +26,10 @@ RUN git clone https://github.com/klzgrad/naiveproxy.git .
 WORKDIR /workspace/src
 
 # Build GN using g++ to avoid Clang/libstdc++ compatibility issues
+# -Wno-comment: newer GCC errors on "//" inside comments (GN source has these)
 RUN git clone https://gn.googlesource.com/gn tmp/gn && \
     cd tmp/gn && \
-    CXX=g++ CC=gcc python3 build/gen.py && \
+    CXX="g++ -Wno-comment" CC=gcc python3 build/gen.py && \
     ninja -C out && \
     mkdir -p ../../gn/out && \
     cp out/gn ../../gn/out/ && \

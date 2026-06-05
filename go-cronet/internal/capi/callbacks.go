@@ -4,39 +4,41 @@ package capi
 #include "cronet_api.h"
 
 // Forward declarations for Go callback trampolines
+// Note: CGO exports don't use 'const' in generated headers, so we match that
 extern int goOnResponseStarted(CronetRequest* req, int status_code,
-                                const char* status_text, void* user_data);
-extern int goOnDataReceived(CronetRequest* req, const char* data,
+                                char* status_text, void* user_data);
+extern int goOnDataReceived(CronetRequest* req, char* data,
                             size_t length, void* user_data);
 extern void goOnCompleted(CronetRequest* req, int net_error, void* user_data);
 extern int goOnRedirect(CronetRequest* req, int status_code,
-                        const char* new_url, void* user_data);
+                        char* new_url, void* user_data);
 
-extern void goWSOnConnected(CronetWebSocket* ws, const char* subprotocol,
+extern void goWSOnConnected(CronetWebSocket* ws, char* subprotocol,
                              void* user_data);
-extern void goWSOnMessage(CronetWebSocket* ws, const char* data,
+extern void goWSOnMessage(CronetWebSocket* ws, char* data,
                            size_t length, int is_binary, void* user_data);
 extern void goWSOnClosed(CronetWebSocket* ws, int was_clean, uint16_t code,
-                          const char* reason, void* user_data);
+                          char* reason, void* user_data);
 extern void goWSOnError(CronetWebSocket* ws, int net_error,
-                         const char* message, void* user_data);
+                          char* message, void* user_data);
 
 // Create callbacks struct with Go trampolines
+// Cast to suppress const warnings - the C header uses const char* but CGO generates char*
 static CronetRequestCallbacks makeGoRequestCallbacks() {
     CronetRequestCallbacks cb = {0};
-    cb.on_response_started = goOnResponseStarted;
-    cb.on_data_received = goOnDataReceived;
+    cb.on_response_started = (int (*)(CronetRequest*, int, const char*, void*))goOnResponseStarted;
+    cb.on_data_received = (int (*)(CronetRequest*, const char*, size_t, void*))goOnDataReceived;
     cb.on_completed = goOnCompleted;
-    cb.on_redirect = goOnRedirect;
+    cb.on_redirect = (int (*)(CronetRequest*, int, const char*, void*))goOnRedirect;
     return cb;
 }
 
 static CronetWebSocketCallbacks makeGoWSCallbacks() {
     CronetWebSocketCallbacks cb = {0};
-    cb.on_connected = goWSOnConnected;
-    cb.on_message = goWSOnMessage;
-    cb.on_closed = goWSOnClosed;
-    cb.on_error = goWSOnError;
+    cb.on_connected = (void (*)(CronetWebSocket*, const char*, void*))goWSOnConnected;
+    cb.on_message = (void (*)(CronetWebSocket*, const char*, size_t, int, void*))goWSOnMessage;
+    cb.on_closed = (void (*)(CronetWebSocket*, int, uint16_t, const char*, void*))goWSOnClosed;
+    cb.on_error = (void (*)(CronetWebSocket*, int, const char*, void*))goWSOnError;
     return cb;
 }
 */
@@ -129,7 +131,7 @@ func goOnResponseStarted(req *C.CronetRequest, statusCode C.int, statusText *C.c
 	id := uint64(uintptr(userData))
 	val, ok := requestHandles.Load(id)
 	if !ok {
-		return 0
+		return 1 // cancel: handle gone
 	}
 	h := val.(*RequestHandle)
 	if h.OnResponseStarted != nil {
@@ -149,7 +151,7 @@ func goOnDataReceived(req *C.CronetRequest, data *C.char, length C.size_t, userD
 	id := uint64(uintptr(userData))
 	val, ok := requestHandles.Load(id)
 	if !ok {
-		return 0
+		return 1 // cancel: handle gone
 	}
 	h := val.(*RequestHandle)
 	if h.OnDataReceived != nil {
@@ -179,7 +181,7 @@ func goOnRedirect(req *C.CronetRequest, statusCode C.int, newURL *C.char, userDa
 	id := uint64(uintptr(userData))
 	val, ok := requestHandles.Load(id)
 	if !ok {
-		return 0 // follow by default
+		return 1 // cancel: handle gone
 	}
 	h := val.(*RequestHandle)
 	if h.OnRedirect != nil {

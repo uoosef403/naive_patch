@@ -32,9 +32,10 @@ type EngineConfig struct {
 // DefaultEngineConfig returns sensible defaults.
 func DefaultEngineConfig() EngineConfig {
 	return EngineConfig{
-		EnableHTTP2:   true,
-		EnableBrotli:  true,
-		EnableCookies: true,
+		EnableHTTP2:        true,
+		EnableBrotli:       true,
+		EnableCookies:      true,
+		InsecureSkipVerify: true,
 	}
 }
 

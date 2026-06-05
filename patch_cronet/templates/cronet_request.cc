@@ -12,8 +12,10 @@
 #include "net/base/io_buffer.h"
 #include "net/base/net_errors.h"
 #include "net/base/upload_bytes_element_reader.h"
+#include "net/base/isolation_info.h"
 #include "net/cert/x509_certificate.h"
 #include "net/cert/x509_util.h"
+#include "net/cookies/site_for_cookies.h"
 #include "net/http/http_response_headers.h"
 #include "net/http/http_version.h"
 #include "net/ssl/ssl_connection_status_flags.h"
@@ -131,6 +133,12 @@ void CronetRequest::StartOnIOThread() {
   url_request_ = engine_->context()->CreateRequest(
       gurl, MapPriority(priority_), this, kTrafficAnnotation);
   url_request_->set_method(method_);
+
+  // Set cookie context so Chromium's cookie pipeline stores Set-Cookie
+  // headers and includes stored cookies in outgoing requests.
+  url_request_->set_site_for_cookies(net::SiteForCookies::FromUrl(gurl));
+  url_request_->set_isolation_info(
+      net::IsolationInfo::CreateForInternalRequest(url::Origin::Create(gurl)));
 
   if (!extra_headers_.IsEmpty()) {
     url_request_->SetExtraRequestHeaders(extra_headers_);
@@ -348,6 +356,18 @@ void CronetRequest::OnReadCompleted(net::URLRequest* request,
   }
 
   ReadData();
+}
+
+void CronetRequest::OnSSLCertificateError(net::URLRequest* request,
+                                           int net_error,
+                                           const net::SSLInfo& ssl_info,
+                                           bool fatal) {
+  if (engine_->insecure_skip_verify() && !fatal) {
+    request->ContinueDespiteLastError();
+    return;
+  }
+  request->Cancel();
+  OnRequestComplete(net::ERR_CERT_AUTHORITY_INVALID);
 }
 
 void CronetRequest::ReadData() {

@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -eo pipefail
 
 # Build script for libcronet.so / cronet.dll / libcronet.dylib
 # Based on NaiveProxy's build.sh with corrected GN args.
@@ -65,6 +65,9 @@ enable_dangling_raw_ptr_checks=false
 exclude_unwind_tables=true
 enable_resource_allowlist_generation=false
 symbol_level=0
+use_thin_lto=false
+use_cfi_icall=false
+is_cfi=false
 "
 
 # ── Platform-specific flags ──────────────────────────────────────────────────
@@ -89,6 +92,10 @@ target_sysroot=\"//$WITH_SYSROOT\""
         # LLVM cross-compile workaround
         if [ "$TARGET_CPU" = "x64" ]; then
             flags+=$'\nuse_cfi_icall=false'
+            # Portable x86-64 flags (avoid illegal instruction on older CPUs)
+            flags+=$'\ncronet_extra_cflags=\"-march=x86-64 -mtune=generic -mno-avx512f -mno-avx512dq -mno-avx512bw -mno-avx512vl -mno-avx512cd -mno-avx512vbmi -mno-vaes -mno-vpclmulqdq\"'
+            flags+=$'\ncronet_extra_cxxflags=\"-march=x86-64 -mtune=generic -mno-avx512f -mno-avx512dq -mno-avx512bw -mno-avx512vl -mno-avx512cd -mno-avx512vbmi -mno-vaes -mno-vpclmulqdq\"'
+            flags+=$'\ncronet_extra_ldflags=\"-march=x86-64 -mno-avx512f -mno-avx512dq -mno-avx512bw -mno-avx512vl -mno-avx512cd -mno-avx512vbmi -mno-vaes -mno-vpclmulqdq\"'
         fi
         ;;
 

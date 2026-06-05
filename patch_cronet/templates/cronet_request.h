@@ -11,6 +11,7 @@
 #include "base/synchronization/waitable_event.h"
 #include "base/timer/timer.h"
 #include "net/base/io_buffer.h"
+#include "net/base/isolation_info.h"
 #include "net/base/load_timing_info.h"
 #include "net/http/http_request_headers.h"
 #include "net/ssl/ssl_info.h"
@@ -61,6 +62,10 @@ struct CronetRequest : public net::URLRequest::Delegate {
                           bool* defer_redirect) override;
   void OnResponseStarted(net::URLRequest* request, int net_error) override;
   void OnReadCompleted(net::URLRequest* request, int bytes_read) override;
+  void OnSSLCertificateError(net::URLRequest* request,
+                             int net_error,
+                             const net::SSLInfo& ssl_info,
+                             bool fatal) override;
 
  private:
   void StartOnIOThread();
