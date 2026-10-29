@@ -1,200 +1,60 @@
 # libcronet
 
-Chromium's `net/` stack as a standalone shared library with a plain C API.
-Produces `libcronet.so` (Linux/Android) or `cronet.dll` (Windows) with an
-identical TLS fingerprint to Google Chrome.
+Build Chromium's network stack as a shared library with a C API. This project
+patches the [NaiveProxy](https://github.com/klzgrad/naiveproxy) source tree to
+build the library instead of the proxy executable. It also includes Go bindings
+in [`go-cronet/`](go-cronet/).
 
-Built on top of [klzgrad/naiveproxy](https://github.com/klzgrad/naiveproxy),
-which maintains a stripped-down Chromium source tree that actually compiles
-in reasonable time (~15 min vs hours for full Chrome). This project patches
-NaiveProxy's build to produce a shared library instead of the `naive` proxy
-executable, re-enables WebSockets (NaiveProxy disables them), and removes the
-proxy-specific padding protocol.
+The API includes HTTP requests, WebSockets, proxy settings, cookies, and cache
+settings. See [`cronet_api.h`](patch_cronet/templates/cronet_api.h) for the C
+interface. The library does not include a browser UI or JavaScript engine.
 
-## What you get
+## Build with Docker
 
-A single shared library exporting 25 C functions. The header is
-[`cronet_api.h`](patch_cronet/templates/cronet_api.h). Usable from C, Zig
-(`@cImport`), Rust (`bindgen`), Go (`cgo`), or anything with an FFI.
+The default build targets Linux x64. It downloads NaiveProxy and its build
+dependencies, so it needs network access and significant disk space.
 
-| Feature | Status |
-|---|---|
-| HTTP/1.1, HTTP/2, HTTP/3 (QUIC) | Yes |
-| WebSocket | Yes |
-| TLS fingerprint | Identical to Chrome |
-| Brotli + Zstd decompression | Yes |
-| Cookies (in-memory) | Yes |
-| Proxy (HTTP/SOCKS) | Configurable |
-| Disk cache | Optional |
-
-What it does **not** include: browser UI, rendering, JavaScript, DevTools,
-NaiveProxy's padding protocol, or any of the other 90% of Chromium.
-
-## Quick start
-
-```
+```sh
 docker build -t cronet .
 id=$(docker create cronet)
-docker cp $id:/artifacts ./out
-docker rm $id
-ls out/   # libcronet.so  cronet_api.h
+docker cp "$id:/artifacts" ./out
+docker rm "$id"
 ```
 
-For a specific platform:
+The output directory contains the library and `cronet_api.h`. To select a
+different target, set `TARGET_OS` and `TARGET_CPU`:
 
-```
+```sh
 docker build --build-arg TARGET_OS=win --build-arg TARGET_CPU=x64 -t cronet-win .
 docker build --build-arg TARGET_OS=android --build-arg TARGET_CPU=arm64 -t cronet-android .
-docker build --build-arg TARGET_OS=linux --build-arg TARGET_CPU=arm64 -t cronet-linux-arm64 .
 ```
 
-## Supported targets
-
-| OS | Architectures | Output | Notes |
-|---|---|---|---|
-| `linux` | `x64`, `arm64`, `arm`, `x86` | `libcronet.so` | Sysroot built from Debian snapshot |
-| `win` | `x64`, `arm64` | `cronet.dll` | Cross-compiled from Linux via [xwin](https://github.com/Jake-Shadle/xwin) |
-| `android` | `arm64`, `arm`, `x64`, `x86` | `libcronet.so` | NDK fetched automatically, min SDK 24 |
-
-iOS is not supported. Apple requires Xcode on macOS to link Mach-O binaries.
-There is no cross-compilation path from Linux.
+The build scripts define targets for Linux, Windows, and Android. iOS is not
+supported. See [`build_cronet.sh`](patch_cronet/templates/build_cronet.sh) for
+target options.
 
 ## Build without Docker
 
-If you already have NaiveProxy cloned:
+Clone NaiveProxy and download its Clang toolchain. Then apply the patches from
+this repository and run the generated build script:
 
-```
+```sh
 git clone https://github.com/klzgrad/naiveproxy.git
 cd naiveproxy/src
 ./get-clang.sh
-
-# From this repo's root:
+cd /path/to/naive_patch
 python3 -m patch_cronet /path/to/naiveproxy/src
 cd /path/to/naiveproxy/src
 ./build_cronet.sh linux x64
 ```
 
-## Usage example (C)
+The patches depend on Chromium internal APIs. Changes to NaiveProxy or Chromium
+can require changes to this project.
 
-```c
-#include "cronet_api.h"
-#include <stdio.h>
+## Source
 
-static int on_data(CronetRequest* req, const char* data, size_t len, void* ctx) {
-    fwrite(data, 1, len, stdout);
-    return 0;
-}
+- `patch_cronet/` applies the build patches and contains the C API shim.
+- `go-cronet/` contains Go bindings and tests.
 
-static void on_done(CronetRequest* req, int err, void* ctx) {
-    printf("\n--- done (net_error=%d) ---\n", err);
-}
-
-int main(void) {
-    CronetEngineParams p = { .enable_quic = 1, .enable_http2 = 1 };
-    CronetEngine* engine = cronet_engine_create(&p);
-
-    CronetRequestCallbacks cb = { .on_data_received = on_data, .on_completed = on_done };
-    CronetRequest* req = cronet_request_create(engine, "GET", "https://example.com", &cb, NULL);
-    cronet_request_start(req);
-
-    sleep(3);  // callbacks fire on the IO thread
-
-    cronet_request_destroy(req);
-    cronet_engine_destroy(engine);
-}
-```
-
-Compile: `cc example.c -L. -lcronet -o example`
-
-## CI / GitHub Actions
-
-Push this repo to GitHub and it builds everything automatically. The workflow
-(`.github/workflows/build.yml`) produces 6 artifacts:
-
-- `cronet-linux-x64`, `cronet-linux-arm64`
-- `cronet-win-x64`, `cronet-win-arm64`
-- `cronet-android-arm64`, `cronet-android-arm`
-
-On push to `main`, a GitHub Release is created with `.tar.gz` bundles.
-
-## How it works
-
-`patch_cronet/` is a Python module that patches NaiveProxy's source tree:
-
-1. **Patches `BUILD.gn`** -- adds a `shared_library("cronet")` target to `net/BUILD.gn`
-   and registers it in the root `gn_all` group.
-2. **Copies C++ sources** into `net/tools/cronet/` -- a thin shim layer:
-   - `cronet_engine.cc` -- spins up a `base::Thread` with IO pump, builds a
-     `URLRequestContext` via the builder API.
-   - `cronet_request.cc` -- `URLRequest::Delegate` impl with async read loop.
-   - `cronet_websocket.cc` -- `WebSocketEventInterface` impl with frame reassembly.
-   - `cronet_export.cc` -- `extern "C"` wrappers that delegate to the above.
-3. **Installs `build_cronet.sh`** -- GN args corrected from NaiveProxy's defaults
-   (`enable_websockets=true`, proxy-specific flags removed).
-4. **Fixes cross-compilation** (needed for Windows builds from Linux):
-   - `setup_toolchain.py` -- injects synthetic INCLUDE/LIB/PATH environment
-     so Chromium's toolchain setup works without Visual Studio installed.
-   - `visual_studio_version.gni` -- makes `visual_studio_runtime_dirs`
-     an overridable string arg (Chromium hardcodes it as an empty list).
-   - `base/BUILD.gn` -- removes ATL source files (ATL headers aren't
-     available via xwin; nothing in `net/` uses ATL).
-5. **Fixes build system conflicts** with NaiveProxy's `build_with_chromium = false`:
-   - `perfetto.gni` -- forces embedder mode so perfetto doesn't try to
-     load standalone build files that don't exist in NaiveProxy's tree.
-
-The C++ shim is ~800 lines total. It talks directly to Chromium's internal APIs
-(`URLRequestContextBuilder`, `WebSocketChannel`, etc.) -- there is no
-abstraction layer or wrapper library in between.
-
-## Updating NaiveProxy
-
-When NaiveProxy bumps its Chromium version:
-
-1. `cd naiveproxy && git pull`
-2. `python3 -m patch_cronet src/`
-3. `cd src && ./build_cronet.sh`
-
-If it compiles, you're done. If not, the compiler error will point at the
-exact line in `cronet_*.cc` where a Chromium internal API changed (a renamed
-method, an added parameter, etc.). These are typically 1-3 line fixes.
-
-The patching is idempotent -- safe to run repeatedly.
-
-## Project structure
-
-```
-.
-├── Dockerfile                          # Autonomous build: clone, patch, compile
-├── .github/workflows/build.yml         # CI for 6 platform/arch combos
-└── patch_cronet/
-    ├── __main__.py                     # python3 -m patch_cronet [src_dir]
-    ├── patcher.py                      # Orchestrator
-    ├── gn_patches.py                   # BUILD.gn modifications
-    └── templates/
-        ├── build_cronet.sh             # GN args + ninja invocation
-        ├── cronet_api.h                # Public C header (25 functions)
-        ├── cronet_engine.{h,cc}        # IO thread + URLRequestContext
-        ├── cronet_request.{h,cc}       # HTTP request (URLRequest::Delegate)
-        ├── cronet_websocket.{h,cc}     # WebSocket (WebSocketEventInterface)
-        └── cronet_export.cc            # extern "C" function bodies
-```
-
-## Acknowledgements
-
-This project exists because of:
-
-- [klzgrad/naiveproxy](https://github.com/klzgrad/naiveproxy) -- for
-  maintaining a buildable subset of Chromium's network stack and doing
-  the hard work of tracking upstream.
-- [The Chromium project](https://www.chromium.org/) -- for the actual
-  network stack, BoringSSL, QUIC implementation, and everything else
-  under the hood.
-- [Jake-Shadle/xwin](https://github.com/Jake-Shadle/xwin) -- for making
-  Windows cross-compilation from Linux possible without distributing the
-  Windows SDK.
-
-## License
-
-The C API shim (`patch_cronet/templates/`) is public domain (do whatever you want).
-The resulting binary links against Chromium code, which is under the
-[Chromium BSD-style license](https://chromium.googlesource.com/chromium/src/+/HEAD/LICENSE).
+Chromium and NaiveProxy have their own license and distribution requirements.
+Review those requirements when distributing a build.
